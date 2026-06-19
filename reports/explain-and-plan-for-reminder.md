@@ -82,16 +82,16 @@ Results:
   (async emits some term forms that hit the def-eq gap in (1) more often; not
   flakiness).
 
-### Residual (future work)
-~2% flakiness remains (e.g. grind_clean_den): a **lazily-imported constant cached
-in an intermediate form** — the transient-decl fix covers our own checked decls
-but a constant pulled via `find_const` from one decl's env can still be an
-in-progress version that we then cache. Options: (a) don't permanently cache
-lazily-imported *definitions* whose env-form may still change (re-import on
-reference) — simplest, modest perf cost; (b) detect staleness by re-querying
-`find_const` cheaply (compare a hash/identity) and refresh; (c) the principled
-end state is fixing the def-eq gap in (1), which removes the *consequence* of any
-intermediate form being momentarily seen.
+### Residual (~2%) is NOT concurrency — it is the def-eq gap (1)
+The transient-decl fix fully resolves the **concurrency-induced** (staleness)
+flakiness. The ~2% that remains (e.g. grind_clean_den, 1/58) was diagnosed by
+trace: the failing `def_eq` is between genuinely different-looking propositions
+from a `grind` field/ring proof (`a < b/2` vs `a ≠ b`), i.e. sokonanoda's
+conversion checker can't equate them. It flickers only because the upstream
+tactic (`grind`) and parallel elaboration emit **nondeterministic proof terms**,
+some of which hit the def-eq gap. So this is category (1), surfaced through
+nondeterminism — fixing sokonanoda's `whnf`/`def_eq` completeness removes it; no
+further concurrency work is needed.
 
 ## (historical) Original plan to keep parallelism
 

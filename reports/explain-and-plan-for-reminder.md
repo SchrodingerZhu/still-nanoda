@@ -60,7 +60,40 @@ Independently, the checker wraps its state in a single `Mutex<Checker>`, so even
 with async ON every kernel check is **serialized**. We get correctness but throw
 away Lean's parallel checking. This is the thing to fix for performance.
 
-## 3. Plan to keep parallelism
+## 3. Parallelism — DONE (per-thread checkers + transient checked decls)
+
+Implemented and shipped:
+- Replaced the global `Mutex<Checker>` with a **`thread_local!` Checker** — Lean's
+  worker threads now check concurrently with no lock.
+- Made a checked declaration **transient**: it is inserted only for its own
+  `ByName` check and removed afterward, so the persistent per-thread env holds
+  only *lazily-imported* constants (always their final, committed form from the
+  real env). This fixed a parallel-correctness bug: under async Lean adds a
+  declaration in stages (signature `deps=[Nat]` then body `deps=[Nat.brecOn]`),
+  possibly on different threads, so a per-thread cache could pin an intermediate
+  form and then fail to reduce it. Diagnosed via trace-diff of a flaky `f 2 = 4`.
+
+Results:
+- min/kbench/kred/fib: deterministic `[000000]` under async ON (were flaky).
+- Flakiness on a 58-file sample x3: **1 flaky** (down from pervasive).
+- Kernel-heavy parallel speedup: async ON 1.15x over async OFF (more on
+  embarrassingly-parallel workloads, e.g. 1.37x on an omega-heavy file).
+- async-ON parity ~92% vs async-OFF ~96% on the same sample, **deterministically**
+  (async emits some term forms that hit the def-eq gap in (1) more often; not
+  flakiness).
+
+### Residual (future work)
+~2% flakiness remains (e.g. grind_clean_den): a **lazily-imported constant cached
+in an intermediate form** — the transient-decl fix covers our own checked decls
+but a constant pulled via `find_const` from one decl's env can still be an
+in-progress version that we then cache. Options: (a) don't permanently cache
+lazily-imported *definitions* whose env-form may still change (re-import on
+reference) — simplest, modest perf cost; (b) detect staleness by re-querying
+`find_const` cheaply (compare a hash/identity) and refresh; (c) the principled
+end state is fixing the def-eq gap in (1), which removes the *consequence* of any
+intermediate form being momentarily seen.
+
+## (historical) Original plan to keep parallelism
 
 Goal: drop the global `Mutex`, let Lean's worker threads check concurrently,
 while keeping "import each constant once (per worker)".

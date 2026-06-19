@@ -28,6 +28,15 @@ the builtin kernel, lazily importing referenced constants from the real env.
 - timeouts (bv_llvm, 6043): sokonanoda slower on bit-vector/heavy reduction.
 - 10577: known lazy_delta level-param edge case.
 
+## Parallelism (FIXED)
+- Per-thread `Checker` (thread_local), no global lock -> Lean's worker threads
+  check concurrently. Kernel-heavy parallel speedup ~1.15x (more on
+  embarrassingly-parallel workloads).
+- Checked declarations are transient (kept only for their own ByName check); the
+  persistent per-thread env holds only final, lazily-imported constants. Fixed
+  the per-thread intermediate-form caching bug; async ON now near-deterministic
+  (1 flaky / 58 sample). See explain-and-plan-for-reminder.md.
+
 ## Implementation notes
 - Persistent `ExportFile<'static>` under a `Mutex` (Lean checks in parallel).
 - `add_decl`: import transitive const closure (find_const) BEFORE the decl;

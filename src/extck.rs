@@ -347,11 +347,39 @@ impl Checker {
         match accepted {
             Ok(()) => (h.builtin_add_unchecked.unwrap())(env, decl),
             Err(payload) => {
-                (h.dec.unwrap())(env);
-                mk_other_error(h, &panic_msg(&payload))
+                // A structured rejection rebuilds the exact `Kernel.Exception`
+                // (consuming `env`); anything else falls back to `other`.
+                if let Some(ke) = payload.downcast_ref::<crate::kernel_err::KernelErr>() {
+                    mk_kernel_err(h, env, ke)
+                } else {
+                    (h.dec.unwrap())(env);
+                    mk_other_error(h, &panic_msg(&payload))
+                }
             }
         }
     }
+}
+
+/// Rebuild the matching `Kernel.Exception` for a structured rejection. Consumes
+/// `env` (it becomes a field of the exception). Only the name-only variants are
+/// handled here (their message renders no expressions); `lctx` is left null and
+/// the host substitutes an empty `LocalContext`.
+unsafe fn mk_kernel_err(h: &Host, env: *mut LeanObj, ke: &crate::kernel_err::KernelErr) -> *mut LeanObj {
+    use crate::kernel_err::KernelErr::*;
+    let mk = h.mk_kernel_exception.unwrap();
+    let z = ptr::null_mut();
+    let exc = match ke {
+        UnknownConstant { name } => mk(0, env, z, mk_name_dotted(name), z, z, z, z, z),
+        AlreadyDeclared { name } => mk(1, env, z, mk_name_dotted(name), z, z, z, z, z),
+        DeclHasMVars { name } => mk(3, env, z, mk_name_dotted(name), z, z, z, z, z),
+        LetTypeMismatch { name } => mk(7, env, z, mk_name_dotted(name), z, z, z, z, z),
+    };
+    (h.mk_error.unwrap())(exc)
+}
+
+unsafe fn mk_name_dotted(s: &str) -> *mut LeanObj {
+    let parts: Vec<&str> = s.split('.').filter(|p| !p.is_empty()).collect();
+    lean_sys::mk_name(&parts)
 }
 
 fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {

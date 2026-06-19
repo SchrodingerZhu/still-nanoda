@@ -14,6 +14,7 @@ pub mod extck;
 pub mod expr;
 pub mod importer;
 pub mod inductive;
+pub mod kernel_err;
 pub mod lean_sys;
 pub mod level;
 pub mod name;

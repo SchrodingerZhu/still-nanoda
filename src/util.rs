@@ -379,6 +379,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Render a `Name` as its dotted string (e.g. `Foo.Bar.5`). Used to carry a
+    /// name out of the type checker in a structured kernel error (the panic
+    /// payload must be owned/`'static`, so the arena-bound `NamePtr` cannot cross).
+    pub fn name_to_string(&self, n: NamePtr<'t>) -> String {
+        match self.read_name(n) {
+            Name::Anon => String::new(),
+            Name::Str(pfx, sfx, _) => {
+                let mut out = self.name_to_string(pfx);
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(self.read_string(sfx).as_ref());
+                out
+            }
+            Name::Num(pfx, sfx, _) => {
+                let mut out = self.name_to_string(pfx);
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(&format!("{sfx}"));
+                out
+            }
+        }
+    }
+
     /// Convenience function for reading two items as a tuple.
     pub fn read_name_pr(&self, p: NamePtr<'t>, q: NamePtr<'t>) -> (Name<'t>, Name<'t>) {
         (self.read_name(p), self.read_name(q))

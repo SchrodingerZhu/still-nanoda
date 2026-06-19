@@ -217,7 +217,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             self.ctx.subst_declar_info_levels(declar_info, c_uparams)
         } else {
-            panic!("declaration not found in infer_const, {:?}", self.ctx.debug_print(c_name))
+            std::panic::panic_any(crate::kernel_err::KernelErr::UnknownConstant {
+                name: self.ctx.name_to_string(c_name),
+            });
         }
     }
 
@@ -459,7 +461,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             App { .. } => self.infer_app(e, flag),
             Pi { .. } => self.infer_pi(e, flag),
             Lambda { .. } => self.infer_lambda(e, flag),
-            Let { binder_type, val, body, .. } => self.infer_let(binder_type, val, body, flag),
+            Let { binder_name, binder_type, val, body, .. } => self.infer_let(binder_name, binder_type, val, body, flag),
             Const { name, levels, .. } => self.infer_const(name, levels, flag),
             Proj { ty_name, idx, structure, .. } => self.infer_proj(ty_name, idx, structure, flag),
             NatLit { .. } => {
@@ -576,6 +578,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn infer_let(
         &mut self,
+        binder_name: NamePtr<'t>,
         binder_type: ExprPtr<'t>,
         val: ExprPtr<'t>,
         body: ExprPtr<'t>,
@@ -586,7 +589,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             self.infer_sort_of(binder_type, flag);
             let val_ty = self.infer(val, flag);
             // assert that the type annotation of the let value is appropriate.
-            self.assert_def_eq(val_ty, binder_type);
+            if !self.def_eq(val_ty, binder_type, false) {
+                std::panic::panic_any(crate::kernel_err::KernelErr::LetTypeMismatch {
+                    name: self.ctx.name_to_string(binder_name),
+                });
+            }
         }
         let body = self.ctx.inst(body, &[val]);
         self.infer(body, flag)

@@ -28,6 +28,8 @@ extern "C" {
     /// Lean runtime: allocate a `String` from a NUL-terminated UTF-8 buffer.
     /// Resolved against the host (liblean) via `RTLD_GLOBAL`.
     fn lean_mk_string(s: *const c_char) -> *mut LeanObj;
+    /// Lean runtime: `Name.str p s` (consumes both owned arguments).
+    fn lean_name_mk_string(p: *mut LeanObj, s: *mut LeanObj) -> *mut LeanObj;
 }
 
 /// Build a Lean `String` object from a Rust `&str` (owned by the caller).
@@ -37,6 +39,19 @@ extern "C" {
 pub unsafe fn mk_string(s: &str) -> *mut LeanObj {
     let c = std::ffi::CString::new(s).unwrap_or_default();
     lean_mk_string(c.as_ptr())
+}
+
+/// Build a dotted Lean `Name` (e.g. `["String","ofList"]` -> `String.ofList`),
+/// owned by the caller. `Name.anonymous` is the nullary ctor, boxed as scalar 0.
+///
+/// # Safety
+/// Calls into the Lean runtime; only valid once the host is loaded.
+pub unsafe fn mk_name(parts: &[&str]) -> *mut LeanObj {
+    let mut n = 1usize as *mut LeanObj; // lean_box(0) = Name.anonymous
+    for p in parts {
+        n = lean_name_mk_string(n, mk_string(p));
+    }
+    n
 }
 
 const HEADER_SIZE: usize = 8;

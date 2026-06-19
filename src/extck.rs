@@ -137,6 +137,7 @@ struct Checker {
     ef: ExportFile<'static>,
     nat_ext: bool,
     strg_ext: bool,
+    prelude_imported: bool,
 }
 
 thread_local! {
@@ -177,13 +178,56 @@ impl Checker {
             config,
             mutual_block_sizes: new_fx_hash_map(),
         };
-        Checker { ef, nat_ext, strg_ext }
+        Checker { ef, nat_ext, strg_ext, prelude_imported: false }
     }
 
     /// Import the transitive constant closure of `roots` from the real env.
+    /// Import the constants the literal extensions SYNTHESIZE (e.g.
+    /// `String.ofList`/`Char.ofNat` used by `str_lit_to_constructor`). User
+    /// declarations never reference these, so they are never imported lazily and
+    /// `mk_name_cache` would leave them `None` — silently disabling reduction of
+    /// string literals (e.g. `"a" == "b"`). Imported once per thread.
+    unsafe fn ensure_literal_prelude(&mut self, h: &Host, env: *mut LeanObj) {
+        if self.prelude_imported {
+            return;
+        }
+        self.prelude_imported = true;
+        let mut names: Vec<*mut LeanObj> = Vec::new();
+        if self.strg_ext {
+            for n in [
+                &["String", "ofList"][..],
+                &["Char", "ofNat"],
+                &["Char"],
+                &["List", "cons"],
+                &["List", "nil"],
+            ] {
+                names.push(lean_sys::mk_name(n));
+            }
+        }
+        if self.nat_ext {
+            for n in [&["Nat", "zero"][..], &["Nat", "succ"]] {
+                names.push(lean_sys::mk_name(n));
+            }
+        }
+        let seed: Vec<*const LeanObj> = names.iter().map(|&n| n as *const LeanObj).collect();
+        self.import_names_closure(h, env, seed);
+        for n in names {
+            (h.dec.unwrap())(n);
+        }
+    }
+
     unsafe fn ensure_closure(&mut self, h: &Host, env: *mut LeanObj, roots: &[*const LeanObj]) {
         let mut worklist = Vec::new();
         decode::collect_consts(roots, &mut worklist);
+        self.import_names_closure(h, env, worklist);
+    }
+
+    unsafe fn import_names_closure(
+        &mut self,
+        h: &Host,
+        env: *mut LeanObj,
+        mut worklist: Vec<*const LeanObj>,
+    ) {
         let mut seen = new_fx_hash_set();
         while let Some(name_obj) = worklist.pop() {
             if !seen.insert(name_obj) {
@@ -282,6 +326,7 @@ impl Checker {
         // after importing deps and re-inserting, `np` is the LAST entry and its
         // `ByName` cutoff sees every dependency.
         self.ef.declars.shift_remove(&np);
+        self.ensure_literal_prelude(h, env);
         self.ensure_closure(h, env, &roots);
         self.ef.declars.insert(np, declar);
         self.ef.name_cache = self.ef.dag.mk_name_cache();

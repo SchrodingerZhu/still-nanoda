@@ -5,7 +5,6 @@ use crate::expr::{
 };
 use crate::level::{Level, IMAX_HASH, MAX_HASH, PARAM_HASH, SUCC_HASH};
 use crate::name::{Name, NUM_HASH, STR_HASH};
-use crate::parser::parse_export_file;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
 use crate::union_find::UnionFind;
@@ -1134,21 +1133,6 @@ impl Config {
         }
     }
 
-    // Returns the export file, and a list of strings representing the names of "skipped" axioms
-    // (axioms which were in the export file, but not allowed by the execution config).
-    pub fn to_export_file<'a>(self) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
-        if let Some(pathbuf) = self.export_file_path.as_ref() {
-            match OpenOptions::new().read(true).truncate(false).open(pathbuf) {
-                Ok(file) => parse_export_file(BufReader::new(file), self),
-                Err(e) => Err(Box::from(format!("Failed to open export file: {:?}", e))),
-            }
-        } else if self.use_stdin {
-            let reader = BufReader::new(std::io::stdin());
-            parse_export_file(reader, self)
-        } else {
-            panic!("Configuration file must specify en export file path or \"use_stdin\": true")
-        }
-    }
 }
 
 // The intent is to use this for reporting exit status/error info

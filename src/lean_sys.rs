@@ -54,6 +54,110 @@ pub unsafe fn mk_name(parts: &[&str]) -> *mut LeanObj {
     n
 }
 
+/// `Name.anonymous` (the nullary constructor, a boxed scalar).
+#[inline]
+pub fn name_anon() -> *mut LeanObj {
+    1usize as *mut LeanObj
+}
+
+/// `Name.str prefix str` (consumes `pfx`; `s` is a Rust string interned fresh).
+///
+/// # Safety
+/// Calls into the Lean runtime.
+pub unsafe fn name_mk_str(pfx: *mut LeanObj, s: &str) -> *mut LeanObj {
+    lean_name_mk_string(pfx, mk_string(s))
+}
+
+/// `Name.num prefix n` (consumes `pfx`).
+///
+/// # Safety
+/// Calls into the Lean runtime.
+pub unsafe fn name_mk_num(pfx: *mut LeanObj, n: u64) -> *mut LeanObj {
+    lean_name_mk_numeral(pfx, mk_nat(n))
+}
+
+extern "C" {
+    fn lean_name_mk_numeral(p: *mut LeanObj, n: *mut LeanObj) -> *mut LeanObj;
+    fn lean_cstr_to_nat(s: *const c_char) -> *mut LeanObj;
+    // Host-exported wrappers over the inline `lean_alloc_ctor`/`lean_ctor_set`.
+    fn lean_extern_alloc_ctor(tag: u32, num_objs: u32) -> *mut LeanObj;
+    fn lean_extern_ctor_set(o: *mut LeanObj, i: u32, v: *mut LeanObj);
+    fn lean_expr_mk_bvar(idx: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_fvar(n: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_sort(l: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_const(n: *mut LeanObj, ls: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_app(f: *mut LeanObj, a: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_lambda(n: *mut LeanObj, t: *mut LeanObj, e: *mut LeanObj, bi: u8) -> *mut LeanObj;
+    fn lean_expr_mk_forall(n: *mut LeanObj, t: *mut LeanObj, e: *mut LeanObj, bi: u8) -> *mut LeanObj;
+    fn lean_expr_mk_let(n: *mut LeanObj, t: *mut LeanObj, v: *mut LeanObj, b: *mut LeanObj, nondep: u8) -> *mut LeanObj;
+    fn lean_expr_mk_lit(l: *mut LeanObj) -> *mut LeanObj;
+    fn lean_expr_mk_proj(s: *mut LeanObj, idx: *mut LeanObj, e: *mut LeanObj) -> *mut LeanObj;
+    fn lean_level_mk_zero(dummy: *mut LeanObj) -> *mut LeanObj;
+    fn lean_level_mk_succ(l: *mut LeanObj) -> *mut LeanObj;
+    fn lean_level_mk_max(a: *mut LeanObj, b: *mut LeanObj) -> *mut LeanObj;
+    fn lean_level_mk_imax(a: *mut LeanObj, b: *mut LeanObj) -> *mut LeanObj;
+    fn lean_level_mk_param(n: *mut LeanObj) -> *mut LeanObj;
+}
+
+/// Build a Lean `Nat` from a `u64` (boxed scalar when small enough).
+#[inline]
+pub fn mk_nat(n: u64) -> *mut LeanObj {
+    // Lean represents a `Nat` that fits in `isize` as the boxed scalar `(n<<1)|1`.
+    if n <= (usize::MAX >> 1) as u64 {
+        (((n as usize) << 1) | 1) as *mut LeanObj
+    } else {
+        unsafe { mk_nat_str(&n.to_string()) }
+    }
+}
+
+/// Build a Lean `Nat` from its decimal string (handles arbitrary precision).
+///
+/// # Safety
+/// Calls into the Lean runtime.
+pub unsafe fn mk_nat_str(decimal: &str) -> *mut LeanObj {
+    let c = std::ffi::CString::new(decimal).unwrap_or_default();
+    lean_cstr_to_nat(c.as_ptr())
+}
+
+// Thin owned-builder wrappers (each consumes its object arguments, returns owned).
+#[inline] pub unsafe fn expr_bvar(idx: usize) -> *mut LeanObj { lean_expr_mk_bvar(mk_nat(idx as u64)) }
+#[inline] pub unsafe fn expr_fvar(name: *mut LeanObj) -> *mut LeanObj {
+    // `FVarId` is a one-field structure wrapping a `Name`.
+    let id = lean_extern_alloc_ctor(0, 1);
+    lean_extern_ctor_set(id, 0, name);
+    lean_expr_mk_fvar(id)
+}
+#[inline] pub unsafe fn expr_sort(l: *mut LeanObj) -> *mut LeanObj { lean_expr_mk_sort(l) }
+#[inline] pub unsafe fn expr_const(n: *mut LeanObj, ls: *mut LeanObj) -> *mut LeanObj { lean_expr_mk_const(n, ls) }
+#[inline] pub unsafe fn expr_app(f: *mut LeanObj, a: *mut LeanObj) -> *mut LeanObj { lean_expr_mk_app(f, a) }
+#[inline] pub unsafe fn expr_lam(n: *mut LeanObj, t: *mut LeanObj, b: *mut LeanObj, bi: u8) -> *mut LeanObj { lean_expr_mk_lambda(n, t, b, bi) }
+#[inline] pub unsafe fn expr_forall(n: *mut LeanObj, t: *mut LeanObj, b: *mut LeanObj, bi: u8) -> *mut LeanObj { lean_expr_mk_forall(n, t, b, bi) }
+#[inline] pub unsafe fn expr_let(n: *mut LeanObj, t: *mut LeanObj, v: *mut LeanObj, b: *mut LeanObj, nondep: bool) -> *mut LeanObj { lean_expr_mk_let(n, t, v, b, nondep as u8) }
+#[inline] pub unsafe fn expr_proj(ty: *mut LeanObj, idx: usize, s: *mut LeanObj) -> *mut LeanObj { lean_expr_mk_proj(ty, mk_nat(idx as u64), s) }
+#[inline] pub unsafe fn expr_lit_nat(decimal: &str) -> *mut LeanObj {
+    let lit = lean_extern_alloc_ctor(0, 1); // Literal.natVal
+    lean_extern_ctor_set(lit, 0, mk_nat_str(decimal));
+    lean_expr_mk_lit(lit)
+}
+#[inline] pub unsafe fn expr_lit_str(s: &str) -> *mut LeanObj {
+    let lit = lean_extern_alloc_ctor(1, 1); // Literal.strVal
+    lean_extern_ctor_set(lit, 0, mk_string(s));
+    lean_expr_mk_lit(lit)
+}
+#[inline] pub unsafe fn level_zero() -> *mut LeanObj { lean_level_mk_zero(1usize as *mut LeanObj) }
+#[inline] pub unsafe fn level_succ(l: *mut LeanObj) -> *mut LeanObj { lean_level_mk_succ(l) }
+#[inline] pub unsafe fn level_max(a: *mut LeanObj, b: *mut LeanObj) -> *mut LeanObj { lean_level_mk_max(a, b) }
+#[inline] pub unsafe fn level_imax(a: *mut LeanObj, b: *mut LeanObj) -> *mut LeanObj { lean_level_mk_imax(a, b) }
+#[inline] pub unsafe fn level_param(n: *mut LeanObj) -> *mut LeanObj { lean_level_mk_param(n) }
+/// `List.cons head tail` for a `List Level` (`List.nil` is `name_anon`-style scalar 0).
+#[inline] pub unsafe fn list_cons(head: *mut LeanObj, tail: *mut LeanObj) -> *mut LeanObj {
+    let c = lean_extern_alloc_ctor(1, 2);
+    lean_extern_ctor_set(c, 0, head);
+    lean_extern_ctor_set(c, 1, tail);
+    c
+}
+#[inline] pub fn list_nil() -> *mut LeanObj { 1usize as *mut LeanObj }
+
 const HEADER_SIZE: usize = 8;
 const PTR_SIZE: usize = std::mem::size_of::<usize>();
 

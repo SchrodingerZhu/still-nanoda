@@ -83,7 +83,15 @@ impl<'p> ExportFile<'p> {
                 self.with_tc_and_declar(*d.info(), |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::tc::InferFlag::Check);
-                    tc.assert_def_eq(inferred_type, d.info().ty);
+                    // The value's inferred type must match the declared type;
+                    // a mismatch is `Kernel.Exception.declTypeMismatch`, whose
+                    // message shows the (closed) given type exported here.
+                    if !tc.def_eq(inferred_type, d.info().ty, false) {
+                        let given = unsafe { tc.ctx.export_expr(inferred_type) };
+                        std::panic::panic_any(crate::kernel_err::KernelErr::DeclTypeMismatch {
+                            given_type: crate::kernel_err::SendObj(given),
+                        });
+                    }
                 }),
             Constructor(ctor_data) => {
                 self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());

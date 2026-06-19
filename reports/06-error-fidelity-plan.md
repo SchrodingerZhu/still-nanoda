@@ -77,6 +77,35 @@ variants.
   names; full fidelity needs reconstructing the `LocalContext`.
 - Map `appTypeMismatch`/`exprTypeMismatch`/`funExpected`/… with exported exprs.
 
+## STATUS: Phase 1 + Phase 2 (declTypeMismatch) DONE
+
+**Phase 1 (name-only variants) — shipped.** Structured `KernelErr` via
+`panic_any`, downcast in extck.rs, rebuilt host-side. Covers `letTypeMismatch`
+(fixes 10577), `unknownConstant`, `alreadyDeclared`, `declHasMVars`. Host fills an
+empty `LocalContext` for null lctx and a trivial `Prop` for message-ignored null
+expr fields (a null field would crash on `lean_dec`). tests/elab parity → 100%.
+
+**Phase 2 (expr export + declTypeMismatch) — shipped.** Implemented
+`ExprPtr → lean_object` export (`TcCtx::export_expr/level/levels/name`) over all
+`Expr`/`Level` forms, plus a small `Name`/`Literal`/`List`/`FVarId` builder FFI.
+Two inline lean.h functions (`lean_alloc_ctor`/`lean_ctor_set`) aren't linkable
+symbols, so the host exports `lean_extern_alloc_ctor`/`lean_extern_ctor_set`
+wrappers. `check_declar`'s value-type mismatch now raises
+`KernelErr::DeclTypeMismatch { given_type }` with the exported (closed) inferred
+type; extck.rs builds `Kernel.Exception.declTypeMismatch` (code 2) with the
+borrowed `decl` (inc'd) for the expected type. Verified EXACT match vs builtin:
+```
+(kernel) declaration type mismatch, 'myBadDef' has type
+  Type
+but it is expected to have type
+  Nat
+```
+and for a nested type (`Nat → Nat`). The export machinery now enables the other
+expr-carrying variants (appTypeMismatch, exprTypeMismatch, funExpected, …) as
+follow-ups; each needs its specific tc.rs call site instrumented, and exprs that
+mention bound variables will print opaque fvar names unless the `LocalContext` is
+also reconstructed.
+
 ## Open questions for discussion
 1. Is Phase 1 alone enough for now (exact messages where no exprs are shown,
    generic elsewhere), or do you want Phase 2 (expr export) too?

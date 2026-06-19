@@ -350,7 +350,7 @@ impl Checker {
                 // A structured rejection rebuilds the exact `Kernel.Exception`
                 // (consuming `env`); anything else falls back to `other`.
                 if let Some(ke) = payload.downcast_ref::<crate::kernel_err::KernelErr>() {
-                    mk_kernel_err(h, env, ke)
+                    mk_kernel_err(h, env, decl, ke)
                 } else {
                     (h.dec.unwrap())(env);
                     mk_other_error(h, &panic_msg(&payload))
@@ -364,7 +364,12 @@ impl Checker {
 /// `env` (it becomes a field of the exception). Only the name-only variants are
 /// handled here (their message renders no expressions); `lctx` is left null and
 /// the host substitutes an empty `LocalContext`.
-unsafe fn mk_kernel_err(h: &Host, env: *mut LeanObj, ke: &crate::kernel_err::KernelErr) -> *mut LeanObj {
+unsafe fn mk_kernel_err(
+    h: &Host,
+    env: *mut LeanObj,
+    decl: *mut LeanObj,
+    ke: &crate::kernel_err::KernelErr,
+) -> *mut LeanObj {
     use crate::kernel_err::KernelErr::*;
     let mk = h.mk_kernel_exception.unwrap();
     let z = ptr::null_mut();
@@ -373,6 +378,11 @@ unsafe fn mk_kernel_err(h: &Host, env: *mut LeanObj, ke: &crate::kernel_err::Ker
         AlreadyDeclared { name } => mk(1, env, z, mk_name_dotted(name), z, z, z, z, z),
         DeclHasMVars { name } => mk(3, env, z, mk_name_dotted(name), z, z, z, z, z),
         LetTypeMismatch { name } => mk(7, env, z, mk_name_dotted(name), z, z, z, z, z),
+        DeclTypeMismatch { given_type } => {
+            // `decl` is borrowed; give the exception its own reference.
+            (h.inc.unwrap())(decl);
+            mk(2, env, z, z, decl, given_type.0 as *mut LeanObj, z, z, z)
+        }
     };
     (h.mk_error.unwrap())(exc)
 }

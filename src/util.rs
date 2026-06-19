@@ -339,6 +339,17 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) expr_cache: ExprCache<'t>,
 }
 
+/// Map sokonanoda's `BinderStyle` to Lean's `BinderInfo` tag (`expr.h`).
+fn binder_style_u8(b: crate::expr::BinderStyle) -> u8 {
+    use crate::expr::BinderStyle::*;
+    match b {
+        Default => 0,
+        Implicit => 1,
+        StrictImplicit => 2,
+        InstanceImplicit => 3,
+    }
+}
+
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>) -> Self {
         Self { export_file, dag: tdag, dbj_level_counter: 0u16, unique_counter: 0u32, expr_cache: ExprCache::new() }
@@ -401,6 +412,96 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
                 out.push_str(&format!("{sfx}"));
                 out
             }
+        }
+    }
+
+    /// Export a sokonanoda `Expr` back to a Lean `lean_object` (owned). Used to
+    /// fill the expression payloads of a structured kernel error so its message
+    /// matches the builtin kernel. Free variables print opaquely without their
+    /// local context, but closed error expressions (the common case) are exact.
+    ///
+    /// # Safety
+    /// Calls into the Lean runtime; the returned object is owned by the caller.
+    pub unsafe fn export_expr(&self, e: ExprPtr<'t>) -> *mut crate::lean_sys::LeanObj {
+        use crate::expr::Expr::*;
+        use crate::lean_sys as ls;
+        match self.read_expr(e) {
+            Var { dbj_idx, .. } => ls::expr_bvar(dbj_idx as usize),
+            Sort { level, .. } => ls::expr_sort(self.export_level(level)),
+            Const { name, levels, .. } => ls::expr_const(self.export_name(name), self.export_levels(levels)),
+            App { fun, arg, .. } => ls::expr_app(self.export_expr(fun), self.export_expr(arg)),
+            Pi { binder_name, binder_style, binder_type, body, .. } => ls::expr_forall(
+                self.export_name(binder_name),
+                self.export_expr(binder_type),
+                self.export_expr(body),
+                binder_style_u8(binder_style),
+            ),
+            Lambda { binder_name, binder_style, binder_type, body, .. } => ls::expr_lam(
+                self.export_name(binder_name),
+                self.export_expr(binder_type),
+                self.export_expr(body),
+                binder_style_u8(binder_style),
+            ),
+            Let { binder_name, binder_type, val, body, nondep, .. } => ls::expr_let(
+                self.export_name(binder_name),
+                self.export_expr(binder_type),
+                self.export_expr(val),
+                self.export_expr(body),
+                nondep,
+            ),
+            Proj { ty_name, idx, structure, .. } => {
+                ls::expr_proj(self.export_name(ty_name), idx, self.export_expr(structure))
+            }
+            NatLit { ptr, .. } => {
+                let s = self.read_bignum(ptr).map(|b| b.to_string()).unwrap_or_else(|| "0".to_string());
+                ls::expr_lit_nat(&s)
+            }
+            StringLit { ptr, .. } => ls::expr_lit_str(self.read_string(ptr).as_ref()),
+            // No local context here, so use the binder name as the fvar's user name.
+            Local { binder_name, .. } => ls::expr_fvar(self.export_name(binder_name)),
+        }
+    }
+
+    /// Export a sokonanoda `Level` to a Lean `lean_object` (owned). See `export_expr`.
+    ///
+    /// # Safety
+    /// Calls into the Lean runtime.
+    pub unsafe fn export_level(&self, l: LevelPtr<'t>) -> *mut crate::lean_sys::LeanObj {
+        use crate::level::Level::*;
+        use crate::lean_sys as ls;
+        match self.read_level(l) {
+            Zero => ls::level_zero(),
+            Succ(x, _) => ls::level_succ(self.export_level(x)),
+            Max(a, b, _) => ls::level_max(self.export_level(a), self.export_level(b)),
+            IMax(a, b, _) => ls::level_imax(self.export_level(a), self.export_level(b)),
+            Param(n, _) => ls::level_param(self.export_name(n)),
+        }
+    }
+
+    /// Export a level list as a Lean `List Level` (owned).
+    ///
+    /// # Safety
+    /// Calls into the Lean runtime.
+    pub unsafe fn export_levels(&self, lvls: LevelsPtr<'t>) -> *mut crate::lean_sys::LeanObj {
+        use crate::lean_sys as ls;
+        let levels = self.read_levels(lvls);
+        let mut out = ls::list_nil();
+        for &l in levels.iter().rev() {
+            out = ls::list_cons(self.export_level(l), out);
+        }
+        out
+    }
+
+    /// Export a sokonanoda `Name` to a Lean `Name` (owned). See `export_expr`.
+    ///
+    /// # Safety
+    /// Calls into the Lean runtime.
+    pub unsafe fn export_name(&self, n: NamePtr<'t>) -> *mut crate::lean_sys::LeanObj {
+        use crate::lean_sys as ls;
+        match self.read_name(n) {
+            Name::Anon => ls::name_anon(),
+            Name::Str(pfx, sfx, _) => ls::name_mk_str(self.export_name(pfx), self.read_string(sfx).as_ref()),
+            Name::Num(pfx, sfx, _) => ls::name_mk_num(self.export_name(pfx), sfx),
         }
     }
 

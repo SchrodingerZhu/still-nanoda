@@ -87,6 +87,42 @@ fn host() -> &'static Host {
     unsafe { &*HOST.load(Ordering::Acquire) }
 }
 
+fn debug_on() -> bool {
+    std::env::var_os("SOKONANODA_DEBUG").is_some()
+}
+
+/// The name object of a Check-kind `Declaration` (decl -> val -> ConstantVal -> name).
+unsafe fn ls_decl_name(decl: *const LeanObj) -> *const LeanObj {
+    let val = lean_sys::ctor_get(decl, 0);
+    let cv = lean_sys::ctor_get(val, 0);
+    lean_sys::ctor_get(cv, 0)
+}
+
+/// Reconstruct a Lean `Name` object's dotted string (for debug output).
+unsafe fn name_to_string(n: *const LeanObj) -> String {
+    use crate::term::NameKind::*;
+    match Name(n).kind() {
+        Anon => String::new(),
+        Str(pre, s) => {
+            let p = name_to_string(pre.0);
+            if p.is_empty() {
+                s.to_string()
+            } else {
+                format!("{p}.{s}")
+            }
+        }
+        Num(pre, i) => {
+            let p = name_to_string(pre.0);
+            let i = i.as_usize().unwrap_or(0);
+            if p.is_empty() {
+                i.to_string()
+            } else {
+                format!("{p}.{i}")
+            }
+        }
+    }
+}
+
 /// The persistent external checker state: sokonanoda's own growing environment.
 /// Accessed under a `Mutex` because Lean may check declarations concurrently.
 struct Checker {
@@ -157,6 +193,9 @@ impl Checker {
             }
             let ci_opt = (h.find_const.unwrap())(env, name_obj as *mut LeanObj);
             if lean_sys::is_scalar(ci_opt) {
+                if debug_on() {
+                    eprintln!("[sokonanoda] find_const MISS {}", name_to_string(name_obj));
+                }
                 continue; // `none`: not a constant (e.g. the declaration being added)
             }
             let ci = lean_sys::ctor_get(ci_opt, 0);
@@ -166,8 +205,15 @@ impl Checker {
                 let mut imp = Importer::new(&mut self.ef.dag, self.nat_ext, self.strg_ext);
                 decode::decode_constant_info(&mut imp, ci)
             };
-            if let Ok(d) = decoded {
-                self.ef.declars.insert(np, d);
+            match decoded {
+                Ok(d) => {
+                    self.ef.declars.insert(np, d);
+                }
+                Err(e) => {
+                    if debug_on() {
+                        eprintln!("[sokonanoda] decode FAIL {}: {}", name_to_string(name_obj), e);
+                    }
+                }
             }
             (h.dec.unwrap())(ci_opt);
         }
@@ -199,10 +245,22 @@ impl Checker {
         };
 
         let np = declar.info().name;
-        // Insert first so self-references resolve and `EnvLimit::ByName` finds it.
-        self.ef.declars.insert(np, declar);
+        // Import dependencies FIRST so they precede the new declaration in the
+        // index map: `check_declar` uses `EnvLimit::ByName(np)`, whose cutoff is
+        // `np`'s index, so only constants inserted before `np` are visible.
         let roots = decode::decl_expr_roots(decl);
+        if debug_on() {
+            let mut deps = Vec::new();
+            decode::collect_consts(&roots, &mut deps);
+            let names: Vec<String> = deps.iter().map(|&n| name_to_string(n)).collect();
+            eprintln!("[sokonanoda] CHECK {} deps={:?}", name_to_string(ls_decl_name(decl)), names);
+        }
+        // Remove any prior entry for `np` (e.g. a forward placeholder) so that
+        // after importing deps and re-inserting, `np` is the LAST entry and its
+        // `ByName` cutoff sees every dependency.
+        self.ef.declars.shift_remove(&np);
         self.ensure_closure(h, env, &roots);
+        self.ef.declars.insert(np, declar);
         self.ef.name_cache = self.ef.dag.mk_name_cache();
 
         let accepted = {

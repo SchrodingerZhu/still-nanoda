@@ -95,6 +95,17 @@ pub unsafe fn ctor_get_uint8(o: *const LeanObj, offset: usize) -> u8 {
     *(o as *const u8).add(HEADER_SIZE + offset)
 }
 
+/// Read a `u32` scalar field at byte `offset` past the object array
+/// (`lean_ctor_get_uint32`).
+///
+/// # Safety
+/// As [`ctor_get_uint8`], for a `u32`.
+#[inline]
+pub unsafe fn ctor_get_uint32(o: *const LeanObj, offset: usize) -> u32 {
+    let p = (o as *const u8).add(HEADER_SIZE + offset);
+    (p as *const u32).read_unaligned()
+}
+
 /// Read a `u64` scalar field at byte `offset` past the object array
 /// (`lean_ctor_get_uint64`).
 ///
@@ -111,8 +122,7 @@ pub unsafe fn ctor_get_uint64(o: *const LeanObj, offset: usize) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// A Lean `Nat` is either a tagged scalar (small) or an mpz bignum object.
-/// Returns the small value when it fits, else `None` (bignum — TODO: decode
-/// mpz; bvar/proj indices are always small in practice).
+/// Returns the small value when it is a scalar, else `None` (bignum).
 #[inline]
 pub fn nat_as_usize(o: *const LeanObj) -> Option<usize> {
     if is_scalar(o) {
@@ -120,6 +130,39 @@ pub fn nat_as_usize(o: *const LeanObj) -> Option<usize> {
     } else {
         None
     }
+}
+
+// Lean (built with GMP) stores a big `Nat` as an `mpz_object`:
+//   offset 0:  lean_object m_header        (8 bytes)
+//   offset 8:  __mpz_struct { i32 _mp_alloc; i32 _mp_size; mp_limb_t* _mp_d }
+// so _mp_size is at +12, the limb pointer at +16. Limbs are `mp_limb_t` (u64 on
+// LP64), little-endian limb order; `_mp_size` is the signed limb count (a `Nat`
+// is non-negative, so it is >= 0).
+const MPZ_SIZE_OFFSET: usize = 12;
+const MPZ_LIMBS_OFFSET: usize = 16;
+
+/// Decode a Lean `Nat` (scalar or mpz bignum) into a `BigUint`.
+///
+/// # Safety
+/// `o` must be a live Lean `Nat` object.
+pub unsafe fn nat_to_biguint(o: *const LeanObj) -> num_bigint::BigUint {
+    use num_bigint::BigUint;
+    if is_scalar(o) {
+        return BigUint::from(unbox(o));
+    }
+    let base = o as *const u8;
+    let size = (base.add(MPZ_SIZE_OFFSET) as *const i32).read_unaligned();
+    if size == 0 {
+        return BigUint::from(0u32);
+    }
+    let nlimbs = size.unsigned_abs() as usize;
+    let limbs_ptr = (base.add(MPZ_LIMBS_OFFSET) as *const *const u64).read_unaligned();
+    let limbs = std::slice::from_raw_parts(limbs_ptr, nlimbs);
+    let mut bytes = Vec::with_capacity(nlimbs * 8);
+    for &limb in limbs {
+        bytes.extend_from_slice(&limb.to_le_bytes());
+    }
+    BigUint::from_bytes_le(&bytes)
 }
 
 // ---------------------------------------------------------------------------

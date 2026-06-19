@@ -7,6 +7,7 @@
 
 pub mod conv;
 pub mod debug_printer;
+pub mod decode;
 pub mod env;
 pub mod eval;
 pub mod extck;

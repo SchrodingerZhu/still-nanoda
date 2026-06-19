@@ -1,27 +1,35 @@
 //! FFI entry point for using sokonanoda as a Lean `--external-checker-lib`.
 //!
 //! Mirrors the two versioned callback tables in the host's
-//! `src/kernel/external_checker.h`: the host passes us a table of helpers
-//! (`tick`, `Kernel.Exception` builders, `find_const`, `builtin_add_decl`) and
-//! we fill a table of our own (`add_decl`, optional primitives).
+//! `src/kernel/external_checker.h`. The checker keeps a persistent
+//! `ExportFile` (its own environment): each `add_decl` imports the new
+//! declaration once into that arena, lazily imports any constants it references
+//! from the real Lean environment (`find_const`), and runs sokonanoda's
+//! `check_declar`. Inductive/quotient/mutual declarations are delegated to the
+//! builtin kernel (which generates their recursors); on success of a checked
+//! declaration the trusted environment update is done once via
+//! `builtin_add_unchecked` (no double-check).
 //!
-//! Current stage: `add_decl` delegates every declaration to the host's builtin
-//! kernel via `builtin_add_decl`, which makes `lean --external-checker-lib` an
-//! exact passthrough of the builtin kernel. Real checking is then moved into
-//! sokonanoda one declaration kind at a time. All entry points are wrapped in
-//! `catch_unwind` so a Rust panic becomes a `Kernel.Exception.other` rather than
-//! unwinding across the FFI boundary.
+//! All entry points are wrapped in `catch_unwind`: a sokonanoda rejection is a
+//! Rust panic, which becomes `Except.error (Kernel.Exception.other ..)`.
 
-use crate::lean_sys::LeanObj;
+use crate::decode::{self, Decoded};
+use crate::importer::Importer;
+use crate::lean_sys::{self, LeanObj};
+use crate::pretty_printer::PpOptions;
+use crate::term::Name;
+use crate::util::{new_fx_hash_map, new_fx_hash_set, new_fx_index_map, Config, ExportFile, LeanDag};
 use std::ffi::c_void;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
 
 /// Must match `LEAN_EXTERNAL_CHECKER_ABI_VERSION` in the host header.
 const ABI_VERSION: u32 = 1;
 
 type LeanFn1 = unsafe extern "C" fn(*mut LeanObj) -> *mut LeanObj;
+type VoidFn1 = unsafe extern "C" fn(*mut LeanObj);
 type TickFn = unsafe extern "C" fn(u64, *mut i32) -> i32;
 type MkExcFn = unsafe extern "C" fn(
     u32,
@@ -36,8 +44,10 @@ type MkExcFn = unsafe extern "C" fn(
 ) -> *mut LeanObj;
 type FindConstFn = unsafe extern "C" fn(*mut LeanObj, *mut LeanObj) -> *mut LeanObj;
 type AddDeclFn = unsafe extern "C" fn(*mut LeanObj, usize, *mut LeanObj, *mut LeanObj) -> *mut LeanObj;
+type AddUncheckedFn = unsafe extern "C" fn(*mut LeanObj, *mut LeanObj) -> *mut LeanObj;
 
-/// Host -> checker callback table (mirrors `lean_external_checker_host`).
+/// Host -> checker callback table (mirrors `lean_external_checker_host`,
+/// field order must match exactly).
 #[repr(C)]
 pub struct Host {
     pub abi_version: u32,
@@ -47,6 +57,9 @@ pub struct Host {
     pub mk_kernel_exception: Option<MkExcFn>,
     pub find_const: Option<FindConstFn>,
     pub builtin_add_decl: Option<AddDeclFn>,
+    pub inc: Option<VoidFn1>,
+    pub dec: Option<VoidFn1>,
+    pub builtin_add_unchecked: Option<AddUncheckedFn>,
 }
 
 type CheckerAddDecl =
@@ -67,19 +80,159 @@ pub struct Callbacks {
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
-/// The host table, stored at registration and read (immutably) by callbacks.
-/// Set once before any `add_decl`, so a plain atomic pointer suffices.
 static HOST: AtomicPtr<Host> = AtomicPtr::new(ptr::null_mut());
 
 #[inline]
 fn host() -> &'static Host {
-    // Safe: set once in `populate` before the host issues any callback.
     unsafe { &*HOST.load(Ordering::Acquire) }
 }
 
-/// Build `Except.error (Kernel.Exception.other msg)` for a panic/other failure.
+/// The persistent external checker state: sokonanoda's own growing environment.
+/// Accessed under a `Mutex` because Lean may check declarations concurrently.
+struct Checker {
+    ef: ExportFile<'static>,
+    nat_ext: bool,
+    strg_ext: bool,
+}
+
+// The data is all u32 arena indices / POD; live `lean_object` pointers are only
+// touched during a call (never stored), and access is serialized by the Mutex.
+unsafe impl Send for Checker {}
+
+fn make_config() -> Config {
+    Config {
+        export_file_path: None,
+        use_stdin: false,
+        permitted_axioms: None,
+        unpermitted_axiom_hard_error: false,
+        num_threads: 0,
+        nat_extension: true,
+        string_extension: true,
+        pp_declars: None,
+        unknown_pp_declar_hard_error: false,
+        pp_options: PpOptions::default(),
+        pp_output_path: None,
+        pp_to_stdout: false,
+        print_success_message: false,
+        print_axioms: false,
+        unsafe_permit_all_axioms: true,
+    }
+}
+
+impl Checker {
+    fn new() -> Checker {
+        let config = make_config();
+        let (nat_ext, strg_ext) = (config.nat_extension, config.string_extension);
+        let dag = LeanDag::new(&config);
+        let name_cache = dag.mk_name_cache();
+        let ef = ExportFile {
+            dag,
+            declars: new_fx_index_map(),
+            notations: new_fx_hash_map(),
+            name_cache,
+            config,
+            mutual_block_sizes: new_fx_hash_map(),
+        };
+        Checker { ef, nat_ext, strg_ext }
+    }
+
+    /// Import the transitive constant closure of `roots` from the real env.
+    unsafe fn ensure_closure(&mut self, h: &Host, env: *mut LeanObj, roots: &[*const LeanObj]) {
+        let mut worklist = Vec::new();
+        decode::collect_consts(roots, &mut worklist);
+        let mut seen = new_fx_hash_set();
+        while let Some(name_obj) = worklist.pop() {
+            if !seen.insert(name_obj) {
+                continue;
+            }
+            let np = {
+                let mut imp = Importer::new(&mut self.ef.dag, self.nat_ext, self.strg_ext);
+                match imp.import_name(Name(name_obj)) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                }
+            };
+            if self.ef.declars.contains_key(&np) {
+                continue;
+            }
+            let ci_opt = (h.find_const.unwrap())(env, name_obj as *mut LeanObj);
+            if lean_sys::is_scalar(ci_opt) {
+                continue; // `none`: not a constant (e.g. the declaration being added)
+            }
+            let ci = lean_sys::ctor_get(ci_opt, 0);
+            let ci_roots = decode::ci_expr_roots(ci);
+            decode::collect_consts(&ci_roots, &mut worklist);
+            let decoded = {
+                let mut imp = Importer::new(&mut self.ef.dag, self.nat_ext, self.strg_ext);
+                decode::decode_constant_info(&mut imp, ci)
+            };
+            if let Ok(d) = decoded {
+                self.ef.declars.insert(np, d);
+            }
+            (h.dec.unwrap())(ci_opt);
+        }
+    }
+
+    /// Check or delegate one declaration. `env` is owned; `decl`/`cancel`
+    /// borrowed. Returns owned `Except Kernel.Exception Environment`.
+    unsafe fn run_add_decl(
+        &mut self,
+        h: &Host,
+        env: *mut LeanObj,
+        max_heartbeat: usize,
+        decl: *mut LeanObj,
+        cancel: *mut LeanObj,
+    ) -> *mut LeanObj {
+        let decoded = {
+            let mut imp = Importer::new(&mut self.ef.dag, self.nat_ext, self.strg_ext);
+            decode::decode_declaration(&mut imp, decl)
+        };
+        let declar = match decoded {
+            Err(e) => {
+                (h.dec.unwrap())(env);
+                return mk_other_error(h, &e.to_string());
+            }
+            Ok(Decoded::Delegate) => {
+                return (h.builtin_add_decl.unwrap())(env, max_heartbeat, decl, cancel);
+            }
+            Ok(Decoded::Check(d)) => d,
+        };
+
+        let np = declar.info().name;
+        // Insert first so self-references resolve and `EnvLimit::ByName` finds it.
+        self.ef.declars.insert(np, declar);
+        let roots = decode::decl_expr_roots(decl);
+        self.ensure_closure(h, env, &roots);
+        self.ef.name_cache = self.ef.dag.mk_name_cache();
+
+        let accepted = {
+            let ef = &self.ef;
+            let dr = ef.declars.get(&np).unwrap();
+            panic::catch_unwind(AssertUnwindSafe(|| ef.check_declar(dr)))
+        };
+        match accepted {
+            Ok(()) => (h.builtin_add_unchecked.unwrap())(env, decl),
+            Err(payload) => {
+                self.ef.declars.shift_remove(&np);
+                (h.dec.unwrap())(env);
+                mk_other_error(h, &panic_msg(&payload))
+            }
+        }
+    }
+}
+
+fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        format!("(sokonanoda) {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("(sokonanoda) {s}")
+    } else {
+        "(sokonanoda) declaration rejected".to_string()
+    }
+}
+
 unsafe fn mk_other_error(h: &Host, msg: &str) -> *mut LeanObj {
-    let s = crate::lean_sys::mk_string(msg);
+    let s = lean_sys::mk_string(msg);
     let exc = (h.mk_kernel_exception.unwrap())(
         12,
         ptr::null_mut(),
@@ -94,30 +247,36 @@ unsafe fn mk_other_error(h: &Host, msg: &str) -> *mut LeanObj {
     (h.mk_error.unwrap())(exc)
 }
 
-/// `add_decl` callback. Owns `env`; borrows `decl`/`opt_cancel_tk`. Returns an
-/// owned `Except Kernel.Exception Environment`.
 unsafe extern "C" fn add_decl(
-    _self: *mut c_void,
+    self_: *mut c_void,
     env: *mut LeanObj,
     max_heartbeat: usize,
     decl: *mut LeanObj,
-    opt_cancel_tk: *mut LeanObj,
+    cancel: *mut LeanObj,
 ) -> *mut LeanObj {
     let h = host();
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        // Delegate every declaration to the builtin kernel for now. This makes
-        // `lean --external-checker-lib` an exact passthrough; checking moves into
-        // sokonanoda per declaration kind in later stages.
-        (h.builtin_add_decl.unwrap())(env, max_heartbeat, decl, opt_cancel_tk)
+        let cell = &*(self_ as *const Mutex<Checker>);
+        let mut chk = cell.lock().unwrap_or_else(|e| e.into_inner());
+        chk.run_add_decl(h, env, max_heartbeat, decl, cancel)
     }));
     match result {
         Ok(obj) => obj,
-        Err(_) => mk_other_error(h, "sokonanoda external checker panicked"),
+        Err(_) => {
+            // Panic outside the (already-caught) check: env was not consumed.
+            (h.dec.unwrap())(env);
+            mk_other_error(h, "sokonanoda external checker panicked")
+        }
     }
 }
 
-/// The one symbol the host resolves via `dlsym`. Receives the host table and
-/// fills `out`. Returns 0 to accept, nonzero to reject (e.g. version mismatch).
+unsafe extern "C" fn release(self_: *mut c_void) {
+    if !self_.is_null() {
+        drop(Box::from_raw(self_ as *mut Mutex<Checker>));
+    }
+}
+
+/// The one symbol the host resolves via `dlsym`.
 ///
 /// # Safety
 /// `host`/`out` must point to valid `Host`/`Callbacks` from the host.
@@ -127,13 +286,14 @@ pub unsafe extern "C" fn lean_external_check_populate_callbacks(host: *const Hos
         return 1;
     }
     HOST.store(host as *mut Host, Ordering::Release);
+    let checker = Box::into_raw(Box::new(Mutex::new(Checker::new())));
     let out = &mut *out;
     out.abi_version = ABI_VERSION;
-    out.self_ = ptr::null_mut();
+    out.self_ = checker as *mut c_void;
     out.add_decl = Some(add_decl);
     out.whnf = None;
     out.check = None;
     out.is_def_eq = None;
-    out.release = None;
+    out.release = Some(release);
     0
 }

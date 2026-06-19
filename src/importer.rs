@@ -198,6 +198,24 @@ impl<'a, 'd> Importer<'a, 'd> {
         Ok(out)
     }
 
+    /// Import a declaration's universe parameters: a `List Name` of level-param
+    /// names becomes a `LevelsPtr` of `Level::Param`s (sokonanoda represents a
+    /// declaration's `uparams` as the list of its parameter levels).
+    ///
+    /// # Safety
+    /// `list_obj` must be a live `List Name`.
+    pub unsafe fn import_uparams(&mut self, list_obj: *const LeanObj) -> Result<LevelsPtr<'a>> {
+        let mut levels = Vec::new();
+        let mut cur = list_obj;
+        while !crate::lean_sys::is_scalar(cur) {
+            let name = self.import_name(term::Name(crate::lean_sys::ctor_get(cur, 0)))?;
+            let hash = hash64!(PARAM_HASH, name);
+            levels.push(self.intern_level(Level::Param(name, hash)));
+            cur = crate::lean_sys::ctor_get(cur, 1);
+        }
+        Ok(self.intern_levels(Arc::from(levels)))
+    }
+
     unsafe fn import_levels(&mut self, ls: term::Levels) -> Result<LevelsPtr<'a>> {
         let raw = ls.collect();
         let mut out = Vec::with_capacity(raw.len());
@@ -260,8 +278,7 @@ impl<'a, 'd> Importer<'a, 'd> {
                 if !self.nat_extension {
                     return Err(ImportError("Nat literal but nat_extension disabled".into()));
                 }
-                let n = nat.as_usize().ok_or_else(|| ImportError("bignum Nat literal (mpz decode TODO)".into()))?;
-                let num_ptr = self.intern_bignum(BigUint::from(n))?;
+                let num_ptr = self.intern_bignum(nat.to_biguint())?;
                 let hash = hash64!(NAT_LIT_HASH, num_ptr);
                 self.intern_expr(Expr::NatLit { ptr: num_ptr, hash })
             }

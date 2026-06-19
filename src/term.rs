@@ -77,9 +77,17 @@ pub struct Nat(pub *const LeanObj);
 
 impl Nat {
     /// The value when it fits in a `usize` (always, for bvar/proj indices).
-    /// `None` for an mpz bignum (decoding those is left to the importer).
+    /// `None` for an mpz bignum.
     pub fn as_usize(self) -> Option<usize> {
         lean_sys::nat_as_usize(self.0)
+    }
+
+    /// The full value as a `BigUint` (decodes mpz bignums).
+    ///
+    /// # Safety
+    /// `self.0` must be a live Lean `Nat` object.
+    pub unsafe fn to_biguint(self) -> num_bigint::BigUint {
+        lean_sys::nat_to_biguint(self.0)
     }
 }
 

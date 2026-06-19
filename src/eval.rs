@@ -421,6 +421,17 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
                 value::mk_rigid_head_with_empty(self.arena, RigidHead::QuotConst(name, levels), empty),
             Some(Declar::Inductive(_)) =>
                 value::mk_rigid_head_with_empty(self.arena, RigidHead::Inductive(name, levels), empty),
+            Some(Declar::Axiom { .. }) | Some(Declar::Opaque { .. }) | None
+                if self.nat_extension && self.is_nat_red_name(name) =>
+            {
+                // A nat-extension op whose body is hidden (e.g. by the module
+                // system, so it arrives as an axiom) must still reduce by name
+                // via the nat extension. Give it an Unfold head so
+                // `unfold_value_go`'s nat path fires; with no body, delta
+                // unfolding correctly leaves it stuck for non-literal arguments.
+                let cell = &*self.arena.alloc(OnceCell::new());
+                value::mk_unfold_head_with_empty(self.arena, name, levels, cell, empty)
+            }
             Some(Declar::Axiom { .. }) | Some(Declar::Opaque { .. }) | None =>
                 value::mk_rigid_head_with_empty(self.arena, RigidHead::Axiom(name, levels), empty),
         };
@@ -1413,6 +1424,14 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn do_nat_red_at(&mut self, name: NamePtr<'t>, args: &[V<'t>], deep: bool) -> Option<V<'t>> {
+        // A nat operation can only be computed once its operands are concrete
+        // bignums, so operand extraction always forces them, regardless of the
+        // outer shallow/deep mode. Without this, the shallow force path (used by
+        // `unify` during def-eq) gives up on a NESTED nat op such as the
+        // `Nat.land 1 (Nat.shiftRight 2 0)` argument of `Nat.beq`, leaving the
+        // whole expression stuck (it would only reduce via `force_all`).
+        let _ = deep;
+        let deep = true;
         let cache = self.ctx.export_file.name_cache;
         if args.len() == 1 && Some(name) == cache.nat_succ {
             let n = self.value_to_bignum_at(args[0], deep)?;

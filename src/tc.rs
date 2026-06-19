@@ -747,9 +747,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if std::env::var_os("SOKONANODA_DEBUG").is_some() {
                 let wu = self.whnf(u);
                 let wv = self.whnf(v);
-                eprintln!("[sokonanoda] DEFEQ FAIL\n  u    = {:?}\n  v    = {:?}\n  whnf u = {:?}\n  whnf v = {:?}",
-                    self.ctx.debug_print(u), self.ctx.debug_print(v),
-                    self.ctx.debug_print(wu), self.ctx.debug_print(wv));
+                let (fvu, fvv) = (self.ctx.has_fvars(wu), self.ctx.has_fvars(wv));
+                eprintln!("[sokonanoda] DEFEQ FAIL has_fvars(u)={} has_fvars(v)={}\n  whnf u = {:?}\n  whnf v = {:?}",
+                    fvu, fvv, self.ctx.debug_print(wu), self.ctx.debug_print(wv));
             }
             panic!("def_eq failed");
         }

@@ -64,6 +64,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     #[inline]
     fn unify<const RIGID: bool>(&mut self, depth: u32, mut x: V<'t>, mut y: V<'t>) -> bool {
         loop {
+            crate::extck::heartbeat();
             x = self.force_thunk(x);
             y = self.force_thunk(y);
             if std::ptr::eq(x, y) {

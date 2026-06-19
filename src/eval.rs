@@ -1036,6 +1036,7 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
             if let Some(f) = forced.get() {
                 return f;
             }
+            crate::extck::heartbeat();
             if self.nat_extension && self.is_nat_red_name(head.name) {
                 if let Some(args) = self.spine_apps(spine) {
                     if let Some(r) = self.do_nat_red(head.name, &args) {

@@ -52,7 +52,6 @@ type AddUncheckedFn = unsafe extern "C" fn(*mut LeanObj, *mut LeanObj) -> *mut L
 pub struct Host {
     pub abi_version: u32,
     pub tick: Option<TickFn>,
-    pub mk_ok: Option<LeanFn1>,
     pub mk_error: Option<LeanFn1>,
     pub mk_kernel_exception: Option<MkExcFn>,
     pub find_const: Option<FindConstFn>,
@@ -64,9 +63,6 @@ pub struct Host {
 
 type CheckerAddDecl =
     unsafe extern "C" fn(*mut c_void, *mut LeanObj, usize, *mut LeanObj, *mut LeanObj) -> *mut LeanObj;
-type CheckerPrim2 = unsafe extern "C" fn(*mut c_void, *mut LeanObj, *mut LeanObj, *mut LeanObj) -> *mut LeanObj;
-type CheckerDefEq =
-    unsafe extern "C" fn(*mut c_void, *mut LeanObj, *mut LeanObj, *mut LeanObj, *mut LeanObj) -> *mut LeanObj;
 
 /// Checker -> host callback table (mirrors `lean_external_checker_callbacks`).
 #[repr(C)]
@@ -74,10 +70,6 @@ pub struct Callbacks {
     pub abi_version: u32,
     pub self_: *mut c_void,
     pub add_decl: Option<CheckerAddDecl>,
-    pub whnf: Option<CheckerPrim2>,
-    pub check: Option<CheckerPrim2>,
-    pub is_def_eq: Option<CheckerDefEq>,
-    pub release: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
 static HOST: AtomicPtr<Host> = AtomicPtr::new(ptr::null_mut());
@@ -142,6 +134,35 @@ struct Checker {
 
 thread_local! {
     static CHECKER: RefCell<Checker> = RefCell::new(Checker::new());
+    // The host `tick` for this thread (set at each `add_decl`), and a progress
+    // counter. Used by `heartbeat()` to charge heartbeats and observe
+    // timeout/cancellation from inside the checker's hot loops.
+    static TICK: std::cell::Cell<Option<TickFn>> = const { std::cell::Cell::new(None) };
+    static TICK_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Charge the heartbeat for checker progress and abort on timeout/cancellation.
+/// Called from the checker's hot loops (reduction and conversion). The common
+/// path is just a thread-local counter bump; only every 4096th call invokes the
+/// host `tick` (which bumps the shared heartbeat and checks the budget / cancel
+/// token set up around `add_decl`). A nonzero result aborts the check via a
+/// structured kernel error (`deterministicTimeout` / `interrupted`).
+#[inline]
+pub fn heartbeat() {
+    let n = TICK_COUNT.with(|c| {
+        let n = c.get().wrapping_add(1);
+        c.set(n);
+        n
+    });
+    if n & 0xFFF == 0 {
+        if let Some(tick) = TICK.with(|t| t.get()) {
+            let mut reason: i32 = 0;
+            let rc = unsafe { tick(0x1000, &mut reason) };
+            if rc != 0 {
+                std::panic::panic_any(crate::kernel_err::KernelErr::Aborted { reason });
+            }
+        }
+    }
 }
 
 fn make_config() -> Config {
@@ -383,6 +404,11 @@ unsafe fn mk_kernel_err(
             (h.inc.unwrap())(decl);
             mk(2, env, z, z, decl, given_type.0 as *mut LeanObj, z, z, z)
         }
+        Aborted { reason } => {
+            // deterministicTimeout / interrupted are nullary: env is not consumed.
+            (h.dec.unwrap())(env);
+            mk(*reason as u32, z, z, z, z, z, z, z, z)
+        }
     };
     (h.mk_error.unwrap())(exc)
 }
@@ -427,6 +453,8 @@ unsafe extern "C" fn add_decl(
 ) -> *mut LeanObj {
     let _ = self_; // checker state is thread-local, not carried in `self`
     let h = host();
+    // The heartbeat/cancel scope set up around this call is observed via `tick`.
+    TICK.with(|t| t.set(h.tick));
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         CHECKER.with(|c| c.borrow_mut().run_add_decl(h, env, max_heartbeat, decl, cancel))
     }));
@@ -459,9 +487,5 @@ pub unsafe extern "C" fn lean_external_check_populate_callbacks(host: *const Hos
     out.abi_version = ABI_VERSION;
     out.self_ = ptr::null_mut(); // checker state is thread-local
     out.add_decl = Some(add_decl);
-    out.whnf = None;
-    out.check = None;
-    out.is_def_eq = None;
-    out.release = None;
     0
 }

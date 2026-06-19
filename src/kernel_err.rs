@@ -39,4 +39,7 @@ pub enum KernelErr {
     /// `given_type` but its declared type differs. The expected type comes from
     /// the `decl` object host-side; `given_type` is exported here.
     DeclTypeMismatch { given_type: SendObj },
+    /// The host `tick` requested an abort: `reason` is a nullary `Kernel.Exception`
+    /// tag (13 = deterministicTimeout, 16 = interrupted).
+    Aborted { reason: i32 },
 }

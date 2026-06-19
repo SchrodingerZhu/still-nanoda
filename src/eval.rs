@@ -1593,9 +1593,11 @@ impl<'x, 't, 'p> TypeChecker<'x, 't, 'p> {
     }
 
     fn bignum_via_force(&mut self, v: V<'t>) -> Option<BigUint> {
-        if self.value_has_free_bvar(v) {
-            return None;
-        }
+        // Force first, then accept only a closed result. A free bound variable in
+        // `v` does NOT preclude a numeral: e.g. `Nat.shiftRight 1 (L.ctorIdx
+        // (L.cons a a))` reduces to a closed `NatLit` because `ctorIdx` discards
+        // its constructor's fields. A forced `NatLit` is closed by construction,
+        // and `value_to_bignum` rejects a succ-chain that bottoms out in a bvar.
         let f = self.force_all(v);
         match f {
             Value::NatLit { ptr } => self.ctx.read_bignum(*ptr).cloned(),

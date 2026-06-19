@@ -744,6 +744,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) {
         if !self.def_eq(u, v, false) {
+            if std::env::var_os("SOKONANODA_DEBUG").is_some() {
+                let wu = self.whnf(u);
+                let wv = self.whnf(v);
+                eprintln!("[sokonanoda] DEFEQ FAIL\n  u    = {:?}\n  v    = {:?}\n  whnf u = {:?}\n  whnf v = {:?}",
+                    self.ctx.debug_print(u), self.ctx.debug_print(v),
+                    self.ctx.debug_print(wu), self.ctx.debug_print(wv));
+            }
             panic!("def_eq failed");
         }
     }

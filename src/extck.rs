@@ -19,11 +19,11 @@ use crate::lean_sys::{self, LeanObj};
 use crate::pretty_printer::PpOptions;
 use crate::term::Name;
 use crate::util::{new_fx_hash_map, new_fx_hash_set, new_fx_index_map, Config, ExportFile, LeanDag};
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::Mutex;
 
 /// Must match `LEAN_EXTERNAL_CHECKER_ABI_VERSION` in the host header.
 const ABI_VERSION: u32 = 1;
@@ -124,16 +124,24 @@ unsafe fn name_to_string(n: *const LeanObj) -> String {
 }
 
 /// The persistent external checker state: sokonanoda's own growing environment.
-/// Accessed under a `Mutex` because Lean may check declarations concurrently.
+///
+/// One `Checker` PER WORKER THREAD (`thread_local!` below). Lean checks
+/// declarations concurrently on a thread pool; giving each thread its own env
+/// removes all shared mutable state, so checks run fully in parallel with no
+/// lock. Cross-thread dependencies are handled by lazy import: a declaration
+/// checked on thread T pulls any constant it references from the real-env
+/// snapshot passed to its `add_decl` (`find_const`), regardless of which thread
+/// added it. The only cost is that a shared constant may be imported once per
+/// worker thread instead of once globally — bounded by the core count.
 struct Checker {
     ef: ExportFile<'static>,
     nat_ext: bool,
     strg_ext: bool,
 }
 
-// The data is all u32 arena indices / POD; live `lean_object` pointers are only
-// touched during a call (never stored), and access is serialized by the Mutex.
-unsafe impl Send for Checker {}
+thread_local! {
+    static CHECKER: RefCell<Checker> = RefCell::new(Checker::new());
+}
 
 fn make_config() -> Config {
     Config {
@@ -209,6 +217,19 @@ impl Checker {
             };
             match decoded {
                 Ok(d) => {
+                    if debug_on() {
+                        let kind = match &d {
+                            crate::env::Declar::Axiom { .. } => "axiom",
+                            crate::env::Declar::Definition { .. } => "def",
+                            crate::env::Declar::Theorem { .. } => "thm",
+                            crate::env::Declar::Opaque { .. } => "opaque",
+                            crate::env::Declar::Quot { .. } => "quot",
+                            crate::env::Declar::Inductive(..) => "ind",
+                            crate::env::Declar::Constructor(..) => "ctor",
+                            crate::env::Declar::Recursor(..) => "rec",
+                        };
+                        eprintln!("[sokonanoda] import {} as {}", name_to_string(name_obj), kind);
+                    }
                     self.ef.declars.insert(np, d);
                 }
                 Err(e) => {
@@ -270,10 +291,17 @@ impl Checker {
             let dr = ef.declars.get(&np).unwrap();
             panic::catch_unwind(AssertUnwindSafe(|| ef.check_declar(dr)))
         };
+        // The checked declaration is TRANSIENT: it was inserted only for its own
+        // `ByName` check. Remove it so the persistent env holds only constants
+        // lazily imported from the real environment (always their final form).
+        // Under Lean's parallel elaboration a declaration is added in stages
+        // (signature then body) possibly on different worker threads; keeping our
+        // own checked copy could pin an intermediate form. A later reference
+        // re-imports the committed, final version via `find_const`.
+        self.ef.declars.shift_remove(&np);
         match accepted {
             Ok(()) => (h.builtin_add_unchecked.unwrap())(env, decl),
             Err(payload) => {
-                self.ef.declars.shift_remove(&np);
                 (h.dec.unwrap())(env);
                 mk_other_error(h, &panic_msg(&payload))
             }
@@ -314,11 +342,10 @@ unsafe extern "C" fn add_decl(
     decl: *mut LeanObj,
     cancel: *mut LeanObj,
 ) -> *mut LeanObj {
+    let _ = self_; // checker state is thread-local, not carried in `self`
     let h = host();
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let cell = &*(self_ as *const Mutex<Checker>);
-        let mut chk = cell.lock().unwrap_or_else(|e| e.into_inner());
-        chk.run_add_decl(h, env, max_heartbeat, decl, cancel)
+        CHECKER.with(|c| c.borrow_mut().run_add_decl(h, env, max_heartbeat, decl, cancel))
     }));
     match result {
         Ok(obj) => obj,
@@ -327,12 +354,6 @@ unsafe extern "C" fn add_decl(
             (h.dec.unwrap())(env);
             mk_other_error(h, "sokonanoda external checker panicked")
         }
-    }
-}
-
-unsafe extern "C" fn release(self_: *mut c_void) {
-    if !self_.is_null() {
-        drop(Box::from_raw(self_ as *mut Mutex<Checker>));
     }
 }
 
@@ -351,14 +372,13 @@ pub unsafe extern "C" fn lean_external_check_populate_callbacks(host: *const Hos
     if !debug_on() {
         panic::set_hook(Box::new(|_| {}));
     }
-    let checker = Box::into_raw(Box::new(Mutex::new(Checker::new())));
     let out = &mut *out;
     out.abi_version = ABI_VERSION;
-    out.self_ = checker as *mut c_void;
+    out.self_ = ptr::null_mut(); // checker state is thread-local
     out.add_decl = Some(add_decl);
     out.whnf = None;
     out.check = None;
     out.is_def_eq = None;
-    out.release = Some(release);
+    out.release = None;
     0
 }

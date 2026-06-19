@@ -96,6 +96,9 @@ the shallow/deep flag. Three independent reduction gaps, each a real fix:
   grind_cutsat_div_1.
 - tests/elab parity (async OFF, first 400): **99.2% (392/395)**, up from ~97.7%.
   No regressions.
+- tests/elab parity (async ON / parallel, first 400): **99.2% (395/398)**, up from
+  ~92% — the fix also removed the residual async flakiness, whose root cause was
+  this same def-eq gap being hit by nondeterministic elaboration terms.
 - Kernel type-checking still ~1.8x faster than builtin (kred: 83.5ms vs 45.6ms);
   the always-deep / force-first changes did not regress performance.
 

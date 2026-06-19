@@ -5,26 +5,32 @@
 kernel for axiom/def/thm/opaque declarations, delegating inductive/quot/mutual to
 the builtin kernel, lazily importing referenced constants from the real env.
 
-- Correct accept/reject on hand battery (typeclasses, structures, lists, props,
-  pattern-match, recursion via `Nat.brecOn`, nat-literal arithmetic).
-- Real corpus (tests/elab, first 200, 196 plain-accepted): **173 ext-accept,
-  23 ext-reject = 88% parity**. Rejects bad proofs correctly.
+## Parity (tests/elab corpus, plain-accepted files)
+- First 200, parallel elab: 173/196 = 88%.
+- **Deterministic (`-D Elab.async=false`): 181/195 = 93%.**
+- After Proj/constructor-closure fix: see 04-final.md.
 
-## Key implementation points
-- Persistent `ExportFile<'static>` in the checker (`Mutex` for Lean's parallel
-  checking). Each constant imported once; resolved by name thereafter.
-- `add_decl`: import deps closure (via `find_const`) BEFORE the decl, re-add the
-  decl last so `EnvLimit::ByName` cutoff sees all deps. Recursive defs need this.
-- mpz bignums decoded from the GMP `__mpz_struct` limbs.
+## Two important findings
+1. **Nondeterminism under parallel elaboration.** Lean's async elaboration emits
+   different (but equivalent) proof terms across runs; sokonanoda's def-eq is
+   incomplete for some forms, so a few files were flaky. `-D Elab.async=false`
+   makes elaboration (and hence the checker result) deterministic.
+2. **Missing inductive/constructor closure (FIXED).** `Expr.proj S idx e` needs
+   the structure `S` and its constructor in the env; an inductive needs its
+   constructors for `can_be_struct`/`is_ctor_app`. These are not reachable via
+   the ConstantInfo's expressions, so they were never imported -> "bad proj" and
+   several "def_eq failed". Now collected/imported explicitly. Fixed 6+ files.
+
+## Remaining failures (genuine sokonanoda NbE limitations)
+- `def_eq failed` (13581, reduceBEqSimproc, unusedVarDoMatch, ...): sokonanoda's
+  def-eq differs from the builtin on some forms. Not import bugs (constructors
+  now present). Would require improving sokonanoda's conversion checker.
+- timeouts (bv_llvm, 6043): sokonanoda slower on bit-vector/heavy reduction.
+- 10577: known lazy_delta level-param edge case.
+
+## Implementation notes
+- Persistent `ExportFile<'static>` under a `Mutex` (Lean checks in parallel).
+- `add_decl`: import transitive const closure (find_const) BEFORE the decl;
+  re-add the decl last so `EnvLimit::ByName` sees all deps (needed for recursion).
+- mpz bignums decoded from GMP `__mpz_struct` limbs.
 - Rejection = Rust panic caught by `catch_unwind` -> `Kernel.Exception.other`.
-
-## Failure categories (23/196) — to investigate
-- `eval.rs:680 spine_type: bad proj` (refl.lean) — projection reduction.
-- `find_const MISS *.eq_def` (4673.lean) — equation lemmas not found via find_const.
-- `def_eq failed` / `let-declaration type mismatch` (10577.lean) — def-eq edge
-  (10577 is the known lazy_delta level-param case).
-- mutual/structural (structuralMutual, TermSeq) — no clear error yet.
-- Several grind_* (heavy) — may be timeouts or unsupported.
-
-Mix of (a) sokonanoda NbE limitations (experimental checker) and (b) possible
-import bugs. 88% parity is the current baseline.

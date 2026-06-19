@@ -36,6 +36,6 @@ the persistent arena; thereafter it is resolved by name with no re-walk.
 
 ## Caveat
 
-Numbers are on the subset sokonanoda checks correctly (88% of a 196-file
-tests/elab sample; see 02-status.md). Some declarations hit sokonanoda NbE
+Numbers are on the subset sokonanoda checks correctly (96.9% of a 291-file
+tests/elab sample after the constructor-closure fix; see 02-status.md / 04-final.md). Some declarations hit sokonanoda NbE
 limitations and are rejected; those are excluded from timing.

@@ -102,10 +102,32 @@ the shallow/deep flag. Three independent reduction gaps, each a real fix:
 - Kernel type-checking still ~1.8x faster than builtin (kred: 83.5ms vs 45.6ms);
   the always-deep / force-first changes did not regress performance.
 
-## Remaining (3/395 — separate, smaller categories)
-- **10577** — `deterministicTimeout`: sokonanoda exceeds the heartbeat budget
-  (performance tail, not correctness).
-- **1692** — `Syntax` def-eq `g ≡ g.stx` (a projection/coercion unfolding, not
-  the nat path).
-- **327** — `isFoo (Name.mkStr1 "foo") ≡ true`: String/Name comparison inside a
-  user matcher; no hidden axiom, a distinct string-reduction gap.
+## The remaining 3 — resolved/diagnosed
+
+### 327 (String comparison) — FIXED
+`"a" == "b"`, `String.append`, `decide` on string equality didn't reduce. Cause:
+`str_lit_to_constructor` synthesizes `String.ofList`/`Char.ofNat`/`List.cons`,
+which **user declarations never reference**, so they were never lazily imported
+and `mk_name_cache` left `string_of_list`/`char_of_nat` = `None` — silently
+disabling string-literal reduction. Proof: `(String.ofList ['a']).utf8ByteSize`
+(explicit) reduced, but `"a".utf8ByteSize` (literal) did not; trace showed
+`String.ofList` absent from the imports. **Fix:** eagerly import this literal
+prelude once per thread (`ensure_literal_prelude`) via a small `Name`-building
+FFI (`lean_name_mk_string`). Same guard added for the nat prelude
+(`Nat.zero`/`Nat.succ`).
+
+### 1692 (`Syntax` `g ≡ g.stx`) — FIXED by the same change
+Its `let rec` + `` `(f 0 1) `` quotation carries string/name literals; once
+string-literal reduction worked, `g ≡ g.stx` reduces. Now passes.
+
+### 10577 (`let-declaration type mismatch`) — NOT an accept/reject divergence
+sokonanoda **correctly rejects** the hand-built ill-typed declaration; it just
+reports a generic `(sokonanoda) def_eq failed` where the builtin reports the
+structured `let-declaration type mismatch 'a'`, and the test pins the exact
+message (`#guard_msgs`). This is an **error-fidelity** gap, not a checking bug.
+Fix path: have sokonanoda's let-value type check emit a structured error carrying
+the binder name + given/expected types, and map it in `extck.rs` to
+`Kernel.Exception.letTypeMismatch` (host ABI code 7 — already supported by
+`lean_extern_mk_kernel_exception`). This is a broader change to sokonanoda's
+error handling (it currently surfaces conversion failures as a single generic
+panic), so it is deferred; accept/reject parity is already correct here.

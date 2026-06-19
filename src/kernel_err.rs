@@ -42,4 +42,12 @@ pub enum KernelErr {
     /// The host `tick` requested an abort: `reason` is a nullary `Kernel.Exception`
     /// tag (13 = deterministicTimeout, 16 = interrupted).
     Aborted { reason: i32 },
+
+    /// code 4: declaration `{name}` has free variables in `e`.
+    DeclHasFVars { name: String, e: SendObj },
+    /// code 9: `application type mismatch {app}` (argument has `arg_type`, function
+    /// has `fn_type`).
+    AppTypeMismatch { app: SendObj, fn_type: SendObj, arg_type: SendObj },
+    /// code 11: `type of theorem '{name}' is not a proposition{ty}`.
+    ThmTypeIsNotProp { name: String, ty: SendObj },
 }

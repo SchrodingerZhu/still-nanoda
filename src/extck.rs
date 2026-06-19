@@ -409,6 +409,23 @@ unsafe fn mk_kernel_err(
             (h.dec.unwrap())(env);
             mk(*reason as u32, z, z, z, z, z, z, z, z)
         }
+        DeclHasFVars { name, e } => {
+            mk(4, env, z, mk_name_dotted(name), z, e.0 as *mut LeanObj, z, z, z)
+        }
+        AppTypeMismatch { app, fn_type, arg_type } => mk(
+            9,
+            env,
+            z,
+            z,
+            z,
+            app.0 as *mut LeanObj,
+            fn_type.0 as *mut LeanObj,
+            arg_type.0 as *mut LeanObj,
+            z,
+        ),
+        ThmTypeIsNotProp { name, ty } => {
+            mk(11, env, z, mk_name_dotted(name), z, ty.0 as *mut LeanObj, z, z, z)
+        }
     };
     (h.mk_error.unwrap())(exc)
 }

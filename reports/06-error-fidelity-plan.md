@@ -106,6 +106,23 @@ follow-ups; each needs its specific tc.rs call site instrumented, and exprs that
 mention bound variables will print opaque fvar names unless the `LocalContext` is
 also reconstructed.
 
+## UPDATE: remaining variants wired
+
+Now reproduced EXACTLY (verified vs builtin): `declTypeMismatch`, `letTypeMismatch`,
+`unknownConstant`, `alreadyDeclared`, `declHasMVars`, `appTypeMismatch`,
+`thmTypeIsNotProp`, `declHasFVars`. The expr exporter supplies the (closed) type
+payloads; `appTypeMismatch` showed `Nat.succ true` / `Bool` / `Nat → Nat`
+identically.
+
+Left as generic `(kernel) (sokonanoda) …` (`other`) on purpose:
+`funExpected` / `typeExpected` / `invalidProj` / `exprTypeMismatch`. The kernel's
+message for these shows the original *term*, but sokonanoda's `ensure_sort` /
+`ensure_pi` only have the inferred *type* at that point — emitting a structured
+error there would print a misleading expression. Making them exact needs threading
+the originating term through those helpers (a focused refactor). Independently,
+errors raised under binders carry free variables that print opaquely without a
+reconstructed `LocalContext`; the closed top-level cases above are exact.
+
 ## Open questions for discussion
 1. Is Phase 1 alone enough for now (exact messages where no exprs are shown,
    generic elsewhere), or do you want Phase 2 (expr export) too?

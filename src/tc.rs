@@ -194,21 +194,31 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// must not contain duplicate universe parameters, mut not have free variables,
     /// and must have an ascribed type that is actually a type (`infer declaration.type` must
     /// be a sort).
+    /// Export an `Expr` to a Lean object wrapped for a structured kernel error.
+    fn err_obj(&self, e: ExprPtr<'t>) -> crate::kernel_err::SendObj {
+        crate::kernel_err::SendObj(unsafe { self.ctx.export_expr(e) })
+    }
+
     pub(crate) fn check_declar_info(&mut self, d: &Declar<'t>) -> Result<(), Box<dyn Error>> {
         let info = d.info();
         assert!(self.ctx.no_dupes_all_params(info.uparams));
-        assert!(!self.ctx.has_fvars(info.ty));
+        if self.ctx.has_fvars(info.ty) {
+            std::panic::panic_any(crate::kernel_err::KernelErr::DeclHasFVars {
+                name: self.ctx.name_to_string(info.name),
+                e: self.err_obj(info.ty),
+            });
+        }
         let inferred_type = self.infer(info.ty, Check);
         let sort = self.ensure_sort(inferred_type);
 
-        // This is sort of a "soft" check in terms of soundness, but for theorems, ensure 
+        // This is sort of a "soft" check in terms of soundness, but for theorems, ensure
         // that they're propositions.
         if let Declar::Theorem {..} = d {
             if !self.ctx.is_zero(sort) {
-                return Err(Box::<dyn Error>::from(format!("Theorem type for {:?} must be `Prop` (sort 0); found type {:?}",
-                    self.ctx.debug_print(info.name),
-                    self.ctx.debug_print(sort)
-                )))
+                std::panic::panic_any(crate::kernel_err::KernelErr::ThmTypeIsNotProp {
+                    name: self.ctx.name_to_string(info.name),
+                    ty: self.err_obj(info.ty),
+                });
             }
         }
         Ok(())
@@ -510,8 +520,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let arg = args.pop().unwrap();
                     if flag == Check {
                         let arg_type = self.infer(arg, flag);
+                        let fn_type = fun;
                         let binder_type = self.ctx.inst(binder_type, ctx.as_slice());
-                        self.assert_def_eq(binder_type, arg_type);
+                        if !self.def_eq(binder_type, arg_type, false) {
+                            std::panic::panic_any(crate::kernel_err::KernelErr::AppTypeMismatch {
+                                app: self.err_obj(e),
+                                fn_type: self.err_obj(fn_type),
+                                arg_type: self.err_obj(arg_type),
+                            });
+                        }
                     }
                     ctx.push(arg);
                     fun = body;

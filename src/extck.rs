@@ -344,6 +344,11 @@ pub unsafe extern "C" fn lean_external_check_populate_callbacks(host: *const Hos
         return 1;
     }
     HOST.store(host as *mut Host, Ordering::Release);
+    // sokonanoda signals a rejected declaration by panicking; we catch those, so
+    // silence the default panic printer unless debugging.
+    if !debug_on() {
+        panic::set_hook(Box::new(|_| {}));
+    }
     let checker = Box::into_raw(Box::new(Mutex::new(Checker::new())));
     let out = &mut *out;
     out.abi_version = ABI_VERSION;

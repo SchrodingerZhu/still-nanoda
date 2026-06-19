@@ -38,13 +38,15 @@ A pluggable external-checker ABI in the C++ kernel:
 ## Results
 
 ### Correctness (tests/elab corpus, plain-accepted files, `-D Elab.async=false`)
-**282/291 = 96.9% parity** with the builtin kernel (accept iff builtin accepts).
-- Started at 88% (parallel) / 93% (deterministic); a constructor/projection
-  dependency-closure fix lifted it to ~97%.
-- 9 remaining: genuine sokonanoda NbE limitations (`def_eq` incompleteness on a
-  few forms: 13581, reduceBEqSimproc, unusedVarDoMatch, some grind_*; the known
-  10577 level-param edge case) and 2 timeouts (bv_llvm, 6043). These are checker
-  limitations, not integration bugs.
+**765/783 = 97.7% parity** with the builtin kernel (accept iff builtin accepts),
+on the first 800 tests/elab files (783 plain-accepted).
+- Started at 88% (200 files, parallel) / 93% (deterministic); a
+  constructor/projection dependency-closure fix lifted it to 97.7%.
+- 18 remaining: **14 `def_eq failed`** (genuine sokonanoda NbE conversion-checker
+  incompleteness on matcher / derived-`BEq` / lazy-delta forms — e.g. 13581,
+  reduceBEqSimproc, unusedVarDoMatch, 10577) and **3 timeouts** (bv_llvm, 6043,
+  heavy grind). These are checker limitations, not integration bugs; sokonanoda
+  correctly rejects bad proofs throughout.
 
 ### Performance (kernel type-checking time, `lean --profile`, mean of 5)
 sokonanoda checks **~1.9-2.1x faster** than the builtin C++ kernel on

@@ -204,7 +204,12 @@ pub unsafe fn collect_consts(roots: &[*const LeanObj], out: &mut Vec<*const Lean
                 stack.push(v.0);
                 stack.push(b.0);
             }
-            Proj(_, _, s) => stack.push(s.0),
+            Proj(ty_name, _, s) => {
+                // The projected structure's inductive (and hence its constructor)
+                // must be imported for projection typing/reduction.
+                out.push(ty_name.0);
+                stack.push(s.0);
+            }
             MData(inner) => stack.push(inner.0),
             Sort(_) | BVar(_) | Lit(_) | FVar(_) | MVar(_) => {}
         }
@@ -224,6 +229,24 @@ pub unsafe fn decl_expr_roots(decl: *const LeanObj) -> Vec<*const LeanObj> {
         roots.push(ls::ctor_get(v, 1));
     }
     roots
+}
+
+/// Related constants that must also be imported alongside a `ConstantInfo`:
+/// an inductive's constructors, a constructor's inductive, a recursor's
+/// inductives. (These are needed by `can_be_struct`, projection typing,
+/// `is_ctor_app`, and iota reduction, but are not reachable through the
+/// `ConstantInfo`'s expressions.)
+///
+/// # Safety
+/// `ci` must be a live `ConstantInfo`.
+pub unsafe fn ci_extra_deps(ci: *const LeanObj) -> Vec<*const LeanObj> {
+    let v = ls::ctor_get(ci, 0);
+    match ls::ptr_tag(ci) {
+        5 => list_objs(ls::ctor_get(v, 4)), // inductive: ctors (List Name)
+        6 => vec![ls::ctor_get(v, 1)],      // constructor: induct (Name)
+        7 => list_objs(ls::ctor_get(v, 1)), // recursor: all inductives (List Name)
+        _ => Vec::new(),
+    }
 }
 
 /// The `Expr` roots of a `ConstantInfo` (type, value, recursor rule rhss).

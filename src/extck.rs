@@ -201,6 +201,8 @@ impl Checker {
             let ci = lean_sys::ctor_get(ci_opt, 0);
             let ci_roots = decode::ci_expr_roots(ci);
             decode::collect_consts(&ci_roots, &mut worklist);
+            // Inductive<->constructor<->recursor relations not reachable via exprs.
+            worklist.extend(decode::ci_extra_deps(ci));
             let decoded = {
                 let mut imp = Importer::new(&mut self.ef.dag, self.nat_ext, self.strg_ext);
                 decode::decode_constant_info(&mut imp, ci)

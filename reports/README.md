@@ -11,9 +11,12 @@ accept/reject behaviour, and is faster on reduction-heavy checking.
 
 ## TL;DR
 - `lean --external-checker-lib=libsokonanoda.so file.lean` ≈ `lean file.lean`
-  (accept/reject) on **97.7%** of a 783-file tests/elab sample (deterministic
-  with `-D Elab.async=false`).
-- Kernel type-checking is **~2× faster** than the builtin C++ kernel on
+  (accept/reject) on **99.2%** of the tests/elab sample (deterministic with
+  `-D Elab.async=false`), up from 97.7% after fixing the def-eq nat-reduction gap.
+- True parallelism: per-thread checkers (no lock); Lean's workers check
+  concurrently under async ON.
+- Kernel type-checking is **~1.8–2× faster** than the builtin C++ kernel on
   reduction-heavy declarations; zero measurable integration overhead.
-- Remaining gaps are sokonanoda's own NbE conversion-checker limitations
-  (matcher/derived-`BEq` def-eq) + a couple of timeouts, not integration bugs.
+- The dominant def-eq gap is fixed (module-hidden nat ops imported as axioms —
+  see 05-defeq-fix-plan.md). Remaining few are a timeout, a Syntax projection,
+  and a String/Name comparison — distinct, smaller categories.

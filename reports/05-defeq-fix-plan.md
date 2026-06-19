@@ -64,10 +64,45 @@ elaborator pre-reduces the operands, so the kernel never exercises this.
 and `force_all`/`do_nat_red` already pass `deep=true` — only the shallow force
 path is buggy).
 
-## Fix
-A nat operation can only be computed once its operands are concrete bignums, so
-operand extraction must force them — regardless of the outer shallow/deep mode.
-Change `do_nat_red_at` to extract operand bignums with `deep=true` always
-(`value_to_bignum_at(arg, true)`). This makes the shallow force path reduce
-nested nat ops too; `force_all`/`do_nat_red` are unaffected (already deep). Bounded
-work (operands are nat expressions reducing to bignums) and results are cached.
+## Fix (IMPLEMENTED — 3 commits)
+The investigation kept peeling layers; the real dominant cause was deeper than
+the shallow/deep flag. Three independent reduction gaps, each a real fix:
+
+1. **Module-hidden nat ops imported as axioms (the big one).** The module system
+   hides a def's body across module boundaries, so `Nat.land` (a `def`) arrives
+   in the kernel env as an `axiom` (no body) — while `Nat.beq`/`Nat.shiftRight`
+   stay defs. `eval_const` made axioms `Rigid` heads, and the nat extension only
+   fires for `Unfold` (def) heads — so `Nat.land` never reduced, and any
+   expression containing it (`Nat.beq (Nat.land …) 1`) stuck. Confirmed by
+   tracing imports: `import Nat.land as axiom`, `import Nat.beq as def`. **Fix:**
+   in `eval_const`, give a nat-red-name axiom/opaque an `Unfold` head so the
+   extension fires by name; with no body, delta unfolding correctly leaves
+   non-literal args stuck.
+
+2. **Shallow operand extraction.** `do_nat_red_at` extracted operand bignums with
+   the outer shallow/deep flag, so the shallow force path (`unify`) gave up on a
+   nested nat op. **Fix:** always extract operands with `deep=true` (a nat op can
+   only compute once its operands are concrete).
+
+3. **Free-bvar guard too conservative.** `bignum_via_force` bailed whenever the
+   value mentioned a bound variable, but a numeral can still result when
+   reduction discards it — `Nat.shiftRight 1 (L.ctorIdx (L.cons a a))` → `0`
+   because `ctorIdx` ignores its fields. **Fix:** force first, accept only a
+   closed result (a forced `NatLit` is closed; `value_to_bignum` rejects a
+   succ-chain ending in a bvar).
+
+## Results
+- All 4 targeted files fixed: 13581, unusedVarDoMatch, reduceBEqSimproc,
+  grind_cutsat_div_1.
+- tests/elab parity (async OFF, first 400): **99.2% (392/395)**, up from ~97.7%.
+  No regressions.
+- Kernel type-checking still ~1.8x faster than builtin (kred: 83.5ms vs 45.6ms);
+  the always-deep / force-first changes did not regress performance.
+
+## Remaining (3/395 — separate, smaller categories)
+- **10577** — `deterministicTimeout`: sokonanoda exceeds the heartbeat budget
+  (performance tail, not correctness).
+- **1692** — `Syntax` def-eq `g ≡ g.stx` (a projection/coercion unfolding, not
+  the nat path).
+- **327** — `isFoo (Name.mkStr1 "foo") ≡ true`: String/Name comparison inside a
+  user matcher; no hidden axiom, a distinct string-reduction gap.

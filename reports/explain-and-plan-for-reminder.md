@@ -1,6 +1,17 @@
 # Explain & plan: remaining errors + parallelism
 
-## 1. What errors remain (97.7% parity; 18/783 fail)
+## UPDATE: the def-eq nat gap (A) is now FIXED — parity 99.2%
+
+The dominant `def_eq failed` category below was root-caused and fixed (see
+`05-defeq-fix-plan.md`): module-hidden nat ops (e.g. `Nat.land`) arrive as
+**axioms**, and sokonanoda's nat extension only fired for `Unfold` (def) heads.
+Three fixes (eval_const Unfold for nat-red axioms; always-deep operand
+extraction; force-before-free-bvar-check) raised tests/elab parity from 97.7% to
+**99.2%** with kernel speed preserved (~1.8x). The text below is retained for
+history; the remaining handful are a timeout + a Syntax projection + a String
+comparison, not the nat gap.
+
+## 1. What errors remain (was 97.7% parity; 18/783 fail — now 99.2%)
 
 All residual failures fall into two buckets.
 
